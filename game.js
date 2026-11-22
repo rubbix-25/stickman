@@ -28,7 +28,8 @@ const CADENCE_TIR_MS = 2000;    // un tir toutes les 2 s
 const VITESSE_BALLE = 650;
 const DUREE_BALLE_MS = 1500;
 const RAYON_DRONE = 18;
-const DELAI_NOUVELLE_PARTIE_MS = 4000; // quand tout le monde est éliminé
+const DUREE_CLASSEMENT_MS = 10000;     // classement affiché avant le retour en salle d'attente
+const COMPTE_A_REBOURS_MS = 3000;      // tout le monde prêt -> la partie démarre 3 s après (Échap annule)
 
 // Réseau : on envoie tout de suite chaque changement (départ, arrêt, saut...),
 // plus une petite correction régulière pendant qu'on bouge.
@@ -155,18 +156,30 @@ document.getElementById("form-rejoindre").addEventListener("submit", (e) => {
 // Le monde (plateformes, drones, cœurs) est fabriqué à partir d'une "graine" :
 // la même graine donne exactement le même monde sur tous les PC. Le réseau n'a
 // donc à transmettre que la graine et le temps de jeu, plus quelques événements.
+// Déroulement : salle d'attente ("attente") -> partie ("jeu") -> classement -> salle
+// d'attente... Chaque étape est un nouveau monde avec un numéro plus grand : tout le
+// monde rejoint automatiquement le monde au numéro le plus grand.
 const monde = {
+  phase: "attente",       // "attente" (salle d'attente) ou "jeu"
+  origine: 0,             // pour une partie : la graine de la salle d'attente d'où elle part
   graine: 0,
-  partie: 0,              // numéro de partie (augmente à chaque nouvelle partie)
+  partie: 0,              // numéro du monde (augmente à chaque étape)
   decalage: 0,            // temps de jeu = performance.now() + decalage
   troncons: new Map(),
   detruits: new Set(),    // drones abattus
   coeursPris: new Set(),  // cœurs ramassés
   finDepuis: null,        // depuis quand tout le monde est éliminé
+  tousPretsDepuis: null,  // salle d'attente : depuis quand tout le monde est prêt
 };
 
 function tMonde(maintenant = performance.now()) { return maintenant + monde.decalage; }
-function cameraA(T) { return Math.max(0, T / 1000 * DEFILEMENT); }
+function cameraA(T) { return monde.phase === "attente" ? 0 : Math.max(0, T / 1000 * DEFILEMENT); }
+
+// Salle d'attente : une pièce fixe, quelques plateformes pour s'entraîner, pas de drones
+const PLATEFORMES_SALLE = [
+  { x: 90, y: 110, w: 150 }, { x: 330, y: 200, w: 130 }, { x: 560, y: 110, w: 150 },
+  { x: 760, y: 200, w: 150 }, { x: 420, y: 330, w: 170 },
+];
 
 // Nombre pseudo-aléatoire reproductible
 function hachage(...valeurs) {
@@ -191,6 +204,9 @@ function troncon(i) {
 }
 
 function genererTroncon(i) {
+  if (monde.phase === "attente") {
+    return { plateformes: i === 0 ? PLATEFORMES_SALLE : [], drones: [], coeur: null };
+  }
   const r = aleatoire(hachage(monde.graine, i, 7));
   const debut = i * TRONCON;
 
@@ -321,6 +337,7 @@ function lancerJeu(nom, tete) {
 
   // Seul pour l'instant : on crée un monde. S'il y a déjà une partie dans la
   // salle, on la rejoindra dès qu'on reçoit des nouvelles des autres.
+  monde.phase = "attente";
   monde.graine = (Math.random() * 2 ** 31) | 0;
   monde.partie = 0;
   monde.decalage = -performance.now();
@@ -332,22 +349,32 @@ function lancerJeu(nom, tete) {
     h: performance.now(),
     vies: VIES_MAX, score: 0, elimine: false,
     invincibleJusqua: 0, prochainTir: 0,
+    pret: false,          // salle d'attente : prêt à lancer la partie
+    spectateur: false,    // arrivé pendant une partie : on regarde seulement
   };
+  let classement = null;  // figé quand tout le monde est éliminé
   const autres = new Map();
   let balles = [];      // { proprio, local, x, y, dir, h, couleur, recu }
   let eclats = [];      // petites étincelles quand un drone explose
 
-  function reinitialiserMoi() {
+  function reinitialiserMoi(spectateur) {
     const cam = cameraA(tMonde());
-    moi.x = cam + 100 + Math.random() * 200;
+    moi.x = monde.phase === "attente" ? 100 + Math.random() * 800 : cam + 100 + Math.random() * 200;
     moi.y = 0; moi.vy = 0; moi.vx = 0; moi.sol = true; moi.baisse = false;
-    moi.vies = VIES_MAX; moi.score = 0; moi.elimine = false;
-    moi.invincibleJusqua = performance.now() + INVINCIBLE_MS;
+    moi.vies = VIES_MAX; moi.score = 0;
+    moi.spectateur = spectateur;
+    moi.elimine = spectateur;   // un spectateur regarde, comme un joueur éliminé
+    moi.pret = false;
+    moi.invincibleJusqua = monde.phase === "jeu" ? performance.now() + INVINCIBLE_MS : 0;
     moi.prochainTir = 0;
   }
-  reinitialiserMoi();
-  moi.invincibleJusqua = 0;
-  function changerDeMonde(graine, partie, T) {
+  reinitialiserMoi(false);
+
+  function changerDeMonde(graine, partie, T, phase, origine) {
+    // Je participe à une partie seulement si je viens de sa salle d'attente
+    const participant = phase !== "jeu" || (monde.phase === "attente" && origine === monde.graine);
+    monde.phase = phase;
+    monde.origine = origine;
     monde.graine = graine;
     monde.partie = partie;
     monde.decalage = T - performance.now();
@@ -355,8 +382,10 @@ function lancerJeu(nom, tete) {
     monde.detruits.clear();
     monde.coeursPris.clear();
     monde.finDepuis = null;
+    monde.tousPretsDepuis = null;
+    classement = null;
     balles = []; eclats = [];
-    reinitialiserMoi();
+    reinitialiserMoi(!participant);
   }
 
   // Les joueurs du même monde que moi (moi compris)
@@ -385,7 +414,9 @@ function lancerJeu(nom, tete) {
       dir: moi.dir, marche: moi.marche, baisse: moi.baisse, sol: moi.sol,
       vies: moi.vies, score: moi.score, elim: moi.elimine,
       inv: maintenant < moi.invincibleJusqua,
+      pret: moi.pret, spect: moi.spectateur,
       s: monde.graine, n: monde.partie, T: Math.round(h + monde.decalage),
+      ph: monde.phase, o: monde.origine,
     };
   };
 
@@ -401,7 +432,7 @@ function lancerJeu(nom, tete) {
       const rejoindre = n > monde.partie ||
         (n === monde.partie && (tLui > tMoi + 500 || (Math.abs(tLui - tMoi) <= 500 && m.s < monde.graine)));
       if (rejoindre) {
-        changerDeMonde(m.s, n, tLui);
+        changerDeMonde(m.s, n, tLui, m.ph === "jeu" ? "jeu" : "attente", m.o | 0);
         envoyer();
         net.send({ t: "salut", ...etat() }); // pour connaître les drones déjà abattus
       }
@@ -469,6 +500,8 @@ function lancerJeu(nom, tete) {
     j.elimine = !!m.elim;
     j.inv = !!m.inv;
     j.graine = m.s;
+    j.pret = !!m.pret;
+    j.spectateur = !!m.spect;
     j.vu = recu;
 
     // Écart d'horloge (on garde le plus petit vu) et irrégularité du réseau
@@ -515,6 +548,12 @@ function lancerJeu(nom, tete) {
     if (k === " ") {
       e.preventDefault();
       if (!e.repeat) tirer();
+      return;
+    }
+    // Salle d'attente : Entrée = prêt, Échap = annuler
+    if (monde.phase === "attente" && !moi.spectateur && (k === "enter" || k === "escape")) {
+      e.preventDefault();
+      moi.pret = k === "enter";
       return;
     }
     if (["arrowleft", "arrowright", "arrowup", "arrowdown", "q", "a", "d", "z", "w", "s"].includes(k)) {
@@ -665,7 +704,7 @@ function lancerJeu(nom, tete) {
     moi.h = maintenant;
 
     // Départ, arrêt, saut, atterrissage, vie perdue... : on prévient tout de suite
-    const intention = [moi.vx, moi.dir, moi.baisse, moi.sol, moi.vies, moi.elimine, moi.score].join("|");
+    const intention = [moi.vx, moi.dir, moi.baisse, moi.sol, moi.vies, moi.elimine, moi.score, moi.pret].join("|");
     if (intention !== derniereIntention) {
       derniereIntention = intention;
       envoyer();
@@ -715,16 +754,35 @@ function lancerJeu(nom, tete) {
       return e.vie > 0;
     });
 
-    // Tout le monde éliminé ? Le joueur de référence relance une partie
-    // (les autres la rejoignent automatiquement : son numéro de partie est plus grand).
+    // Passage à l'étape suivante. C'est le joueur de référence qui crée le nouveau
+    // monde ; les autres le rejoignent automatiquement (son numéro est plus grand).
     const tous = [moi, ...memePartie()];
-    if (tous.every(j => j.elimine)) {
-      if (monde.finDepuis === null) monde.finDepuis = maintenant;
-      else if (maintenant - monde.finDepuis > DELAI_NOUVELLE_PARTIE_MS && idReference() === moi.id) {
-        changerDeMonde((Math.random() * 2 ** 31) | 0, monde.partie + 1, 0);
-        envoyer();
-      }
-    } else monde.finDepuis = null;
+    const nouvelleGraine = () => (Math.random() * 2 ** 31) | 0;
+    if (monde.phase === "attente") {
+      // Salle d'attente : quand tout le monde est prêt, compte à rebours puis la
+      // partie démarre (si quelqu'un annule avec Échap, le compte à rebours repart)
+      if (tous.every(j => j.pret)) {
+        if (monde.tousPretsDepuis === null) monde.tousPretsDepuis = maintenant;
+        else if (maintenant - monde.tousPretsDepuis > COMPTE_A_REBOURS_MS && idReference() === moi.id) {
+          changerDeMonde(nouvelleGraine(), monde.partie + 1, 0, "jeu", monde.graine);
+          envoyer();
+        }
+      } else monde.tousPretsDepuis = null;
+    } else {
+      // Partie : quand tous les participants sont éliminés -> classement,
+      // puis retour en salle d'attente
+      const participants = tous.filter(j => !j.spectateur);
+      if (participants.every(j => j.elimine)) {
+        if (monde.finDepuis === null) monde.finDepuis = maintenant;
+        classement = participants
+          .map(j => ({ nom: j.nom, couleur: j.couleur, score: j.score, moi: j === moi }))
+          .sort((a, b) => b.score - a.score);
+        if (maintenant - monde.finDepuis > DUREE_CLASSEMENT_MS && idReference() === moi.id) {
+          changerDeMonde(nouvelleGraine(), monde.partie + 1, 0, "attente", 0);
+          envoyer();
+        }
+      } else { monde.finDepuis = null; classement = null; }
+    }
 
     dessiner(maintenant, T, cam);
     requestAnimationFrame(boucle);
@@ -733,20 +791,31 @@ function lancerJeu(nom, tete) {
   // --- Tableau des scores (en haut) ---
   function majScores() {
     const tous = [moi, ...memePartie()];
-    hudJoueurs.textContent = tous.length + " joueur" + (tous.length > 1 ? "s" : "");
+    const nbSpect = tous.filter(j => j.spectateur).length;
+    hudJoueurs.textContent = (monde.phase === "attente" ? "Salle d'attente · " : "") +
+      (tous.length - nbSpect) + " joueur" + (tous.length - nbSpect > 1 ? "s" : "") +
+      (nbSpect ? " · " + nbSpect + " spectateur" + (nbSpect > 1 ? "s" : "") : "");
     hudScores.textContent = "";
+    const pts = (n) => n + " pt" + (n > 1 ? "s" : "");
     for (const j of tous) {
+      if (j.spectateur) continue;
       const el = document.createElement("span");
-      el.className = "score" + (j.elimine ? " elimine" : "");
       const nomEl = document.createElement("b");
       nomEl.style.color = j.couleur;
       nomEl.textContent = j.nom + (j === moi ? " (toi)" : "");
-      const vies = document.createElement("span");
-      vies.className = "vies";
-      vies.textContent = "♥".repeat(j.vies) + "♡".repeat(VIES_MAX - j.vies);
-      const pts = document.createElement("span");
-      pts.textContent = j.elimine ? "éliminé · " + j.score + " pt" + (j.score > 1 ? "s" : "") : j.score + " pt" + (j.score > 1 ? "s" : "");
-      el.append(nomEl, vies, pts);
+      const info = document.createElement("span");
+      if (monde.phase === "attente") {
+        el.className = "score" + (j.pret ? " pret" : "");
+        info.textContent = j.pret ? "✓ prêt" : "pas prêt";
+        el.append(nomEl, info);
+      } else {
+        el.className = "score" + (j.elimine ? " elimine" : "");
+        const vies = document.createElement("span");
+        vies.className = "vies";
+        vies.textContent = "♥".repeat(j.vies) + "♡".repeat(VIES_MAX - j.vies);
+        info.textContent = j.elimine ? "éliminé · " + pts(j.score) : pts(j.score);
+        el.append(nomEl, vies, info);
+      }
       hudScores.appendChild(el);
     }
   }
@@ -833,20 +902,72 @@ function lancerJeu(nom, tete) {
     ctx.restore();
 
     // Messages au centre
-    let message = "";
-    if (monde.finDepuis !== null) {
-      const reste = Math.max(1, Math.ceil((DELAI_NOUVELLE_PARTIE_MS - (maintenant - monde.finDepuis)) / 1000));
-      message = "Tout le monde est éliminé ! Nouvelle partie dans " + reste + " s";
-    } else if (moi.elimine) {
-      message = "Éliminé ! Tu peux regarder la fin de la partie";
-    }
-    if (message) {
-      ctx.fillStyle = "#1b1b1b";
-      ctx.font = "700 " + Math.round(Math.max(16, 26 * e)) + "px system-ui, sans-serif";
+    const texte = (t, y, taille, poids = 700, couleur = "#1b1b1b") => {
+      ctx.fillStyle = couleur;
+      ctx.font = poids + " " + Math.round(Math.max(taille * 0.6, taille * e)) + "px system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(message, W / 2, oy + VUE_H * e * 0.35);
+      ctx.fillText(t, W / 2, oy + y * e);
+    };
+    if (monde.phase === "attente") {
+      const tous = [moi, ...memePartie()];
+      const prets = tous.filter(j => j.pret).length;
+      if (monde.tousPretsDepuis !== null) {
+        const reste = Math.max(1, Math.ceil((COMPTE_A_REBOURS_MS - (maintenant - monde.tousPretsDepuis)) / 1000));
+        texte("La partie commence dans " + reste + "…", 130, 40);
+        texte("Échap pour annuler", 175, 18, 600, "#555");
+      } else {
+        texte("Salle d'attente", 120, 34);
+        texte(moi.pret ? "Tu es prêt ! On attend les autres… (Échap pour annuler)"
+                       : "Appuie sur Entrée quand tu es prêt · Échap pour annuler", 160, 20, 600);
+        texte(prets + " / " + tous.length + " prêt" + (tous.length > 1 ? "s" : ""), 192, 18, 600, "#555");
+      }
+    } else if (classement) {
+      dessinerClassement(maintenant, e, ox, oy);
+    } else if (moi.spectateur) {
+      texte("Partie en cours : tu regardes. Tu joueras à la prochaine !", 150, 22);
+    } else if (moi.elimine) {
+      texte("Éliminé ! Tu peux regarder la fin de la partie", 150, 24);
     }
+  }
+
+  function dessinerClassement(maintenant, e, ox, oy) {
+    const l = 440 * e, lignes = classement.length;
+    const h = (110 + lignes * 40) * e;
+    const x = ox + (VUE_L * e - l) / 2, y = oy + 90 * e;
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "#1b1b1b";
+    ctx.lineWidth = Math.max(2, 3 * e);
+    ctx.beginPath();
+    ctx.roundRect(x, y, l, h, 14 * e);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#1b1b1b";
+    ctx.font = "800 " + Math.round(Math.max(18, 30 * e)) + "px system-ui, sans-serif";
+    ctx.fillText("Classement", x + l / 2, y + 36 * e);
+
+    const medailles = ["🥇", "🥈", "🥉"];
+    classement.forEach((c, i) => {
+      const ly = y + (80 + i * 40) * e;
+      ctx.font = (c.moi ? "800 " : "600 ") + Math.round(Math.max(13, 21 * e)) + "px system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillStyle = "#1b1b1b";
+      ctx.fillText((medailles[i] || (i + 1) + "."), x + 28 * e, ly);
+      ctx.fillStyle = c.couleur;
+      ctx.fillText(c.nom + (c.moi ? " (toi)" : ""), x + 72 * e, ly);
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#1b1b1b";
+      ctx.fillText(c.score + " pt" + (c.score > 1 ? "s" : ""), x + l - 28 * e, ly);
+    });
+
+    const reste = Math.max(1, Math.ceil((DUREE_CLASSEMENT_MS - (maintenant - monde.finDepuis)) / 1000));
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#555";
+    ctx.font = "600 " + Math.round(Math.max(12, 16 * e)) + "px system-ui, sans-serif";
+    ctx.fillText("Retour en salle d'attente dans " + reste + " s", x + l / 2, y + h - 22 * e);
   }
 
   function dessinerCoeur(x, y, taille, couleur) {
@@ -967,7 +1088,7 @@ function lancerJeu(nom, tete) {
     ctx.font = (estMoi ? "700 " : "600 ") + Math.max(12, Math.round(15 * s)) + "px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(j.nom, teteX, hautTete - 8 * s);
+    ctx.fillText(j.nom + (monde.phase === "attente" && j.pret ? " ✓" : ""), teteX, hautTete - 8 * s);
     if (estMoi) {
       const reste = Math.max(0, moi.prochainTir - maintenant) / CADENCE_TIR_MS;
       if (reste > 0) {
