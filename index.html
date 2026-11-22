@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stickman</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Lobby -->
+  <main id="lobby">
+    <h1 id="titre">Stickman</h1>
+    <form id="form-rejoindre" autocomplete="off">
+      <label for="nom">Ton nom</label>
+      <input id="nom" maxlength="16" placeholder="ex. Bob" required>
+      <button type="submit">Rejoindre la partie</button>
+    </form>
+    <p id="mode" class="petit"></p>
+  </main>
+
+  <!-- Jeu -->
+  <section id="jeu" hidden>
+    <canvas id="canvas"></canvas>
+    <div id="hud">
+      <span id="hud-titre"></span>
+      <span id="hud-joueurs"></span>
+      <span class="petit">← → ou Q / D pour bouger</span>
+    </div>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <script src="net.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

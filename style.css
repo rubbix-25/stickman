@@ -1,0 +1,72 @@
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #f4f1ea;
+  color: #1b1b1b;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#lobby {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 16px;
+  text-align: center;
+}
+
+#lobby h1 {
+  margin: 0;
+  font-size: clamp(32px, 6vw, 64px);
+  letter-spacing: -1px;
+}
+
+#form-rejoindre {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, 100%);
+}
+
+#form-rejoindre label { font-weight: 600; text-align: left; }
+
+#form-rejoindre input,
+#form-rejoindre button {
+  font: inherit;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 2px solid #1b1b1b;
+}
+
+#form-rejoindre input { background: #fff; }
+
+#form-rejoindre button {
+  background: #1b1b1b;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+#form-rejoindre button:hover { background: #333; }
+
+.petit { font-size: 13px; opacity: 0.6; margin: 0; }
+
+#jeu { position: fixed; inset: 0; }
+#jeu[hidden] { display: none; }
+#canvas { display: block; width: 100%; height: 100%; }
+
+#hud {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  gap: 20px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+#hud-titre { font-weight: 700; font-size: 20px; }
