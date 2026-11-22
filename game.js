@@ -14,15 +14,17 @@ const VITESSE = 280;            // unités par seconde
 const VITESSE_ACCROUPI = 120;   // plus lent quand on est baissé
 const IMPULSION_SAUT = 560;     // vitesse vers le haut au moment du saut
 const GRAVITE = 1600;           // ce qui fait retomber
-const ENVOI_MS = 66;            // ~15 envois / s quand on bouge
+// Réseau : on envoie tout de suite chaque changement (départ, arrêt, saut...),
+// plus une petite correction régulière pendant qu'on bouge.
+const ENVOI_MS = 100;           // correction régulière : 10 / s quand on bouge
 const BATTEMENT_MS = 2000;      // signe de vie quand on ne bouge pas
 const EXPIRATION_MS = 6000;     // joueur retiré s'il ne donne plus de nouvelles
-// On affiche les autres joueurs avec un petit retard volontaire : ça laisse le
-// temps aux positions d'arriver, et on peut les relier de façon parfaitement régulière.
-// Il doit couvrir l'intervalle entre deux envois (66 ms) + les irrégularités du réseau.
-const RETARD_AFFICHAGE_MS = 150;
-// Si une position arrive quand même en retard, on prolonge le mouvement au plus ce temps-là.
-const PROLONGATION_MAX_MS = 60;
+// Chaque message contient la position ET la vitesse : entre deux messages, on calcule
+// où est le joueur (vitesse constante, gravité). On garde juste une petite marge
+// ("tampon") pour absorber l'irrégularité du réseau, mesurée en continu.
+const TAMPON_MIN_MS = 15;
+const TAMPON_MAX_MS = 150;
+const PREDICTION_MAX_MS = 400;  // sans nouvelles, on arrête de prédire au-delà
 
 const monId = (crypto.randomUUID && crypto.randomUUID()) ||
   Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -47,43 +49,34 @@ document.getElementById("form-rejoindre").addEventListener("submit", (e) => {
   lancerJeu(nom);
 });
 
-// ---------- Interpolation des autres joueurs ----------
-// Place le joueur j là où il était il y a RETARD_AFFICHAGE_MS, en reliant
-// en ligne droite les deux positions reçues qui encadrent ce moment.
+// ---------- Position des autres joueurs ----------
+// Place le joueur j là où il était il y a "tampon" millisecondes :
+//  - si on a déjà reçu la position d'après, on relie les deux en ligne droite ;
+//  - sinon, on la calcule depuis la dernière reçue, avec sa vitesse et la gravité.
 function interpoler(j, maintenant) {
   const histo = j.historique;
   if (!histo.length) return;
-  const tAffiche = maintenant - j.ecart - RETARD_AFFICHAGE_MS; // en heure de son horloge
+  const tAffiche = maintenant - j.ecart - j.tampon; // en heure de son horloge
 
-  let a = histo[0], b = histo[0];
-  const dernier = histo[histo.length - 1];
-  if (tAffiche >= dernier.h) {
-    // Pas encore de position plus récente : on prolonge un court instant
-    // le dernier mouvement connu, plutôt que de figer le joueur.
-    const avant = histo[histo.length - 2];
-    const depasse = Math.min(tAffiche - dernier.h, PROLONGATION_MAX_MS);
-    j.dir = dernier.dir; j.marche = dernier.marche; j.baisse = dernier.baisse;
-    // Seulement s'il était en mouvement (en marche ou en l'air) et qu'il donne
-    // encore des nouvelles : jamais à l'arrêt, jamais s'il a décroché.
-    const enMouvement = dernier.marche || dernier.y > 0;
-    const recent = maintenant - j.vu < 250;
-    if (avant && enMouvement && recent && dernier.h > avant.h && dernier.h - avant.h < 200) {
-      j.x = dernier.x + (dernier.x - avant.x) / (dernier.h - avant.h) * depasse;
-      j.y = Math.max(0, dernier.y + (dernier.y - avant.y) / (dernier.h - avant.h) * depasse);
-    } else {
-      j.x = dernier.x; j.y = dernier.y;
-    }
+  // a = dernière position connue à ce moment-là, b = la suivante (si déjà reçue)
+  let i = histo.length - 1;
+  while (i > 0 && histo[i].h > tAffiche) i--;
+  const a = histo[i], b = histo[i + 1];
+
+  if (b && tAffiche >= a.h) {
+    const k = (tAffiche - a.h) / (b.h - a.h);
+    j.x = a.x + (b.x - a.x) * k;
+    j.y = a.y + (b.y - a.y) * k;
+    const ref = k < 0.5 ? a : b;
+    j.dir = ref.dir; j.marche = ref.marche; j.baisse = ref.baisse;
     return;
-  } else {
-    for (let i = histo.length - 1; i > 0; i--) {
-      if (histo[i - 1].h <= tAffiche) { a = histo[i - 1]; b = histo[i]; break; }
-    }
   }
-  const k = b.h > a.h ? Math.max(0, Math.min(1, (tAffiche - a.h) / (b.h - a.h))) : 1;
-  j.x = a.x + (b.x - a.x) * k;
-  j.y = a.y + (b.y - a.y) * k;
-  const ref = k < 0.5 ? a : b;
-  j.dir = ref.dir; j.marche = ref.marche; j.baisse = ref.baisse;
+
+  // Prédiction depuis a
+  const dt = Math.max(0, Math.min(tAffiche - a.h, PREDICTION_MAX_MS)) / 1000;
+  j.x = Math.max(PLATEFORME_DEBUT + 15, Math.min(PLATEFORME_FIN - 15, a.x + a.vx * dt));
+  j.y = (a.y > 0 || a.vy > 0) ? Math.max(0, a.y + a.vy * dt - GRAVITE / 2 * dt * dt) : 0;
+  j.dir = a.dir; j.marche = a.marche; j.baisse = a.baisse;
 }
 
 // ---------- Jeu ----------
@@ -100,6 +93,7 @@ function lancerJeu(nom) {
     nom,
     x: PLATEFORME_DEBUT + 50 + Math.random() * (PLATEFORME_FIN - PLATEFORME_DEBUT - 100),
     y: 0,          // hauteur au-dessus de la plateforme (0 = au sol)
+    vx: 0,         // vitesse horizontale
     vy: 0,         // vitesse verticale
     dir: 1,
     marche: false,
@@ -113,8 +107,12 @@ function lancerJeu(nom) {
   // --- Réseau ---
   const net = creerReseau(SALLE);
   const etat = () => ({
-    id: moi.id, nom: moi.nom, h: Math.round(moi.h),
+    // Heure de la dernière mise à jour de la position ; si l'animation est en pause
+    // (onglet en arrière-plan), on ne bouge pas, donc l'heure actuelle convient.
+    id: moi.id, nom: moi.nom,
+    h: Math.round(performance.now() - moi.h < 50 ? moi.h : performance.now()),
     x: Math.round(moi.x * 10) / 10, y: Math.round(moi.y * 10) / 10,
+    vx: Math.round(moi.vx), vy: Math.round(moi.vy),
     dir: moi.dir, marche: moi.marche, baisse: moi.baisse,
   });
 
@@ -137,16 +135,28 @@ function lancerJeu(nom) {
       const ecart = recu - m.h;
       j.ecart = j.ecart === undefined ? ecart : Math.min(ecart, j.ecart + 0.5);
 
+      // Gigue : de combien ce message arrive plus tard que le plus rapide.
+      // On retient le pire cas récent, qui s'oublie doucement (~3 s).
+      const gigue = ecart - j.ecart;
+      j.gigue = j.gigue === undefined ? 20 : Math.max(gigue, j.gigue * 0.97);
+      // Tampon = gigue + petite marge, qui évolue en douceur pour éviter les à-coups
+      const cible = Math.max(TAMPON_MIN_MS, Math.min(TAMPON_MAX_MS, j.gigue + 10));
+      j.tampon = j.tampon === undefined ? cible : j.tampon + (cible - j.tampon) * 0.1;
+
       const dernier = j.historique[j.historique.length - 1];
       if (!dernier || m.h > dernier.h) {
-        j.historique.push({ h: m.h, x: m.x, y: m.y || 0, dir: m.dir, marche: m.marche, baisse: !!m.baisse });
+        j.historique.push({
+          h: m.h, x: m.x, y: m.y || 0, vx: m.vx || 0, vy: m.vy || 0,
+          dir: m.dir, marche: m.marche, baisse: !!m.baisse,
+        });
         // On garde environ 1 seconde d'historique
         while (j.historique.length > 2 && j.historique[1].h < m.h - 1000) j.historique.shift();
       }
     } else {
       // Ancienne version du jeu (sans heure) : on prend la position telle quelle
-      j.historique = [{ h: 0, x: m.x, y: m.y || 0, dir: m.dir, marche: m.marche, baisse: !!m.baisse }];
+      j.historique = [{ h: 0, x: m.x, y: m.y || 0, vx: 0, vy: 0, dir: m.dir, marche: m.marche, baisse: !!m.baisse }];
       j.ecart = 0;
+      j.tampon = 0;
     }
     // Un nouveau venu dit bonjour : on lui répond tout de suite avec notre position.
     if (m.t === "salut") net.send({ t: "etat", ...etat() });
@@ -168,7 +178,7 @@ function lancerJeu(nom) {
     }
   });
   window.addEventListener("keyup", (e) => touches.delete(e.key.toLowerCase()));
-  window.addEventListener("blur", () => { touches.clear(); moi.marche = false; moi.baisse = false; });
+  window.addEventListener("blur", () => { touches.clear(); moi.marche = false; moi.baisse = false; moi.vx = 0; });
 
   // --- Taille du canvas (net sur les écrans haute densité) ---
   function redimensionner() {
@@ -183,19 +193,22 @@ function lancerJeu(nom) {
   let avant = performance.now();
   let dernierEnvoi = 0;
   let dernierEtatEnvoye = "";
+  let derniereIntention = "";
 
-  // Envoi sur un minuteur (et pas dans l'animation) : ça continue même
-  // quand l'onglet est en arrière-plan, donc on ne disparaît pas chez les autres.
+  function envoyer() {
+    const e = etat();
+    net.send({ t: "etat", ...e });
+    dernierEnvoi = performance.now();
+    dernierEtatEnvoye = e.x + "|" + e.y + "|" + e.dir + "|" + e.marche + "|" + e.baisse;
+  }
+
+  // Correction régulière sur un minuteur (et pas dans l'animation) : ça continue
+  // même quand l'onglet est en arrière-plan, donc on ne disparaît pas chez les autres.
   // On envoie seulement si ça a changé, sinon un signe de vie de temps en temps.
   setInterval(() => {
-    const maintenant = performance.now();
     const e = etat();
     const cle = e.x + "|" + e.y + "|" + e.dir + "|" + e.marche + "|" + e.baisse;
-    if (cle !== dernierEtatEnvoye || maintenant - dernierEnvoi > BATTEMENT_MS) {
-      net.send({ t: "etat", ...e });
-      dernierEnvoi = maintenant;
-      dernierEtatEnvoye = cle;
-    }
+    if (cle !== dernierEtatEnvoye || performance.now() - dernierEnvoi > BATTEMENT_MS) envoyer();
   }, ENVOI_MS);
 
   function boucle(maintenant) {
@@ -223,12 +236,19 @@ function lancerJeu(nom) {
     moi.marche = sens !== 0;
     if (sens) moi.dir = sens;
     const vitesse = moi.baisse ? VITESSE_ACCROUPI : VITESSE;
-    moi.x = Math.max(PLATEFORME_DEBUT + 15, Math.min(PLATEFORME_FIN - 15, moi.x + sens * vitesse * dt));
+    moi.vx = sens * vitesse;
+    moi.x = Math.max(PLATEFORME_DEBUT + 15, Math.min(PLATEFORME_FIN - 15, moi.x + moi.vx * dt));
     moi.phase = moi.marche && moi.y === 0 ? moi.phase + dt * (moi.baisse ? 6 : 10) : 0;
     moi.h = maintenant;
 
-    // Les autres : on rejoue leur historique avec un léger retard,
-    // en reliant les positions reçues en ligne droite (interpolation).
+    // Départ, arrêt, demi-tour, saut, atterrissage, accroupi : on prévient tout de suite.
+    const intention = moi.vx + "|" + moi.dir + "|" + moi.baisse + "|" + (moi.y > 0);
+    if (intention !== derniereIntention) {
+      derniereIntention = intention;
+      envoyer();
+    }
+
+    // Les autres : on les place d'après leurs messages (voir interpoler)
     for (const [id, j] of autres) {
       if (maintenant - j.vu > EXPIRATION_MS) { autres.delete(id); continue; }
       interpoler(j, maintenant);
