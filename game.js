@@ -69,11 +69,16 @@ if (!COULEUR_VALIDE.test(maCouleur)) {
 }
 
 // ---------- Têtes (photos) ----------
-// En local, on lit le dossier tetes/ ; en ligne, le bucket public Supabase "tetes".
+// En local, on lit le dossier tetes/. En ligne, les photos sont dans Supabase, dans
+// un dossier au nom secret qui n'est écrit nulle part dans ce code : il vient du
+// lien envoyé aux amis (&cle=...). Sans ce code, pas de photos (tête classique).
 const EN_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const CLE_TETES = /^[a-z0-9]{12,64}$/.test(params.get("cle") || "") ? params.get("cle") : "";
 const BASE_TETES = EN_LOCAL
   ? "tetes/"
-  : (window.CONFIG.SUPABASE_URL || "") + "/storage/v1/object/public/tetes/";
+  : CLE_TETES
+    ? (window.CONFIG.SUPABASE_URL || "") + "/storage/v1/object/public/tetes/" + CLE_TETES + "/"
+    : "";
 const tetesDispo = new Map();   // fichier -> { nom, v }
 const imagesTetes = new Map();  // fichier -> Image
 let maTete = "";
@@ -93,6 +98,7 @@ function imageTete(fichier) {
 }
 
 async function chargerTetes() {
+  if (!BASE_TETES) return; // lien sans code : pas de photos
   try {
     const r = await fetch(BASE_TETES + "liste.json?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) return;
