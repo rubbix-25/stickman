@@ -8,7 +8,7 @@
   <title>Stickman</title>
   <!-- ?v=... : numéro de version, augmenté à chaque mise en ligne pour que les
        navigateurs rechargent les fichiers au lieu d'utiliser une ancienne copie -->
-  <link rel="stylesheet" href="style.css?v=2026112201">
+  <link rel="stylesheet" href="style.css?v=2026112202">
 </head>
 <body>
   <!-- Lobby -->
@@ -30,15 +30,18 @@
   <section id="jeu" hidden>
     <canvas id="canvas"></canvas>
     <div id="hud">
-      <span id="hud-titre"></span>
-      <span id="hud-joueurs"></span>
-      <span class="petit">← → bouger · ↑ sauter · ↓ se baisser</span>
+      <div id="hud-ligne">
+        <span id="hud-titre"></span>
+        <span id="hud-joueurs"></span>
+        <span class="petit">← → bouger · ↑ sauter · ↓ s'accroupir · Espace tirer</span>
+      </div>
+      <div id="scores"></div>
     </div>
   </section>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.min.js"></script>
-  <script src="config.js?v=2026112201"></script>
-  <script src="net.js?v=2026112201"></script>
-  <script src="game.js?v=2026112201"></script>
+  <script src="config.js?v=2026112202"></script>
+  <script src="net.js?v=2026112202"></script>
+  <script src="game.js?v=2026112202"></script>
 </body>
 </html>
