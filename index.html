@@ -6,7 +6,9 @@
   <!-- Demande aux moteurs de recherche (Google...) de ne pas référencer le jeu -->
   <meta name="robots" content="noindex, nofollow">
   <title>Stickman</title>
-  <link rel="stylesheet" href="style.css">
+  <!-- ?v=... : numéro de version, augmenté à chaque mise en ligne pour que les
+       navigateurs rechargent les fichiers au lieu d'utiliser une ancienne copie -->
+  <link rel="stylesheet" href="style.css?v=2026112201">
 </head>
 <body>
   <!-- Lobby -->
@@ -35,8 +37,8 @@
   </section>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.min.js"></script>
-  <script src="config.js"></script>
-  <script src="net.js"></script>
-  <script src="game.js"></script>
+  <script src="config.js?v=2026112201"></script>
+  <script src="net.js?v=2026112201"></script>
+  <script src="game.js?v=2026112201"></script>
 </body>
 </html>
