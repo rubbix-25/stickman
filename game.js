@@ -14,9 +14,15 @@ const VITESSE = 280;            // unités par seconde
 const VITESSE_ACCROUPI = 120;   // plus lent quand on est baissé
 const IMPULSION_SAUT = 560;     // vitesse vers le haut au moment du saut
 const GRAVITE = 1600;           // ce qui fait retomber
-const ENVOI_MS = 100;           // 10 envois / s quand on bouge
+const ENVOI_MS = 66;            // ~15 envois / s quand on bouge
 const BATTEMENT_MS = 2000;      // signe de vie quand on ne bouge pas
 const EXPIRATION_MS = 6000;     // joueur retiré s'il ne donne plus de nouvelles
+// On affiche les autres joueurs avec un petit retard volontaire : ça laisse le
+// temps aux positions d'arriver, et on peut les relier de façon parfaitement régulière.
+// Il doit couvrir l'intervalle entre deux envois (66 ms) + les irrégularités du réseau.
+const RETARD_AFFICHAGE_MS = 150;
+// Si une position arrive quand même en retard, on prolonge le mouvement au plus ce temps-là.
+const PROLONGATION_MAX_MS = 60;
 
 const monId = (crypto.randomUUID && crypto.randomUUID()) ||
   Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -41,6 +47,45 @@ document.getElementById("form-rejoindre").addEventListener("submit", (e) => {
   lancerJeu(nom);
 });
 
+// ---------- Interpolation des autres joueurs ----------
+// Place le joueur j là où il était il y a RETARD_AFFICHAGE_MS, en reliant
+// en ligne droite les deux positions reçues qui encadrent ce moment.
+function interpoler(j, maintenant) {
+  const histo = j.historique;
+  if (!histo.length) return;
+  const tAffiche = maintenant - j.ecart - RETARD_AFFICHAGE_MS; // en heure de son horloge
+
+  let a = histo[0], b = histo[0];
+  const dernier = histo[histo.length - 1];
+  if (tAffiche >= dernier.h) {
+    // Pas encore de position plus récente : on prolonge un court instant
+    // le dernier mouvement connu, plutôt que de figer le joueur.
+    const avant = histo[histo.length - 2];
+    const depasse = Math.min(tAffiche - dernier.h, PROLONGATION_MAX_MS);
+    j.dir = dernier.dir; j.marche = dernier.marche; j.baisse = dernier.baisse;
+    // Seulement s'il était en mouvement (en marche ou en l'air) et qu'il donne
+    // encore des nouvelles : jamais à l'arrêt, jamais s'il a décroché.
+    const enMouvement = dernier.marche || dernier.y > 0;
+    const recent = maintenant - j.vu < 250;
+    if (avant && enMouvement && recent && dernier.h > avant.h && dernier.h - avant.h < 200) {
+      j.x = dernier.x + (dernier.x - avant.x) / (dernier.h - avant.h) * depasse;
+      j.y = Math.max(0, dernier.y + (dernier.y - avant.y) / (dernier.h - avant.h) * depasse);
+    } else {
+      j.x = dernier.x; j.y = dernier.y;
+    }
+    return;
+  } else {
+    for (let i = histo.length - 1; i > 0; i--) {
+      if (histo[i - 1].h <= tAffiche) { a = histo[i - 1]; b = histo[i]; break; }
+    }
+  }
+  const k = b.h > a.h ? Math.max(0, Math.min(1, (tAffiche - a.h) / (b.h - a.h))) : 1;
+  j.x = a.x + (b.x - a.x) * k;
+  j.y = a.y + (b.y - a.y) * k;
+  const ref = k < 0.5 ? a : b;
+  j.dir = ref.dir; j.marche = ref.marche; j.baisse = ref.baisse;
+}
+
 // ---------- Jeu ----------
 function lancerJeu(nom) {
   document.getElementById("lobby").hidden = true;
@@ -60,28 +105,49 @@ function lancerJeu(nom) {
     marche: false,
     baisse: false,
     phase: 0,
+    h: performance.now(), // heure (de mon horloge) de la dernière mise à jour
   };
-  const autres = new Map(); // id -> { nom, x, cibleX, y, cibleY, dir, marche, baisse, phase, vu }
+  // id -> { nom, x, y, dir, marche, baisse, phase, vu, ecart, historique: [{h, x, y, ...}] }
+  const autres = new Map();
 
   // --- Réseau ---
   const net = creerReseau(SALLE);
   const etat = () => ({
-    id: moi.id, nom: moi.nom, x: Math.round(moi.x), y: Math.round(moi.y),
+    id: moi.id, nom: moi.nom, h: Math.round(moi.h),
+    x: Math.round(moi.x * 10) / 10, y: Math.round(moi.y * 10) / 10,
     dir: moi.dir, marche: moi.marche, baisse: moi.baisse,
   });
 
   net.onMessage((m) => {
     if (!m || m.id === moi.id) return;
     if (m.t === "bye") { autres.delete(m.id); return; }
+    const recu = performance.now();
     let j = autres.get(m.id);
     if (!j) {
-      j = { x: m.x, y: m.y || 0, phase: 0 };
+      j = { x: m.x, y: m.y || 0, dir: m.dir, phase: 0, historique: [] };
       autres.set(m.id, j);
     }
-    Object.assign(j, {
-      nom: String(m.nom).slice(0, 16), cibleX: m.x, cibleY: m.y || 0,
-      dir: m.dir, marche: m.marche, baisse: !!m.baisse, vu: performance.now(),
-    });
+    j.nom = String(m.nom).slice(0, 16);
+    j.vu = recu;
+
+    if (typeof m.h === "number") {
+      // Chaque PC a sa propre horloge : on estime l'écart entre la sienne et la nôtre.
+      // On garde l'écart le plus petit vu (= le message le plus rapide), qu'on laisse
+      // remonter très doucement pour suivre si les horloges dérivent.
+      const ecart = recu - m.h;
+      j.ecart = j.ecart === undefined ? ecart : Math.min(ecart, j.ecart + 0.5);
+
+      const dernier = j.historique[j.historique.length - 1];
+      if (!dernier || m.h > dernier.h) {
+        j.historique.push({ h: m.h, x: m.x, y: m.y || 0, dir: m.dir, marche: m.marche, baisse: !!m.baisse });
+        // On garde environ 1 seconde d'historique
+        while (j.historique.length > 2 && j.historique[1].h < m.h - 1000) j.historique.shift();
+      }
+    } else {
+      // Ancienne version du jeu (sans heure) : on prend la position telle quelle
+      j.historique = [{ h: 0, x: m.x, y: m.y || 0, dir: m.dir, marche: m.marche, baisse: !!m.baisse }];
+      j.ecart = 0;
+    }
     // Un nouveau venu dit bonjour : on lui répond tout de suite avec notre position.
     if (m.t === "salut") net.send({ t: "etat", ...etat() });
   });
@@ -159,13 +225,14 @@ function lancerJeu(nom) {
     const vitesse = moi.baisse ? VITESSE_ACCROUPI : VITESSE;
     moi.x = Math.max(PLATEFORME_DEBUT + 15, Math.min(PLATEFORME_FIN - 15, moi.x + sens * vitesse * dt));
     moi.phase = moi.marche && moi.y === 0 ? moi.phase + dt * (moi.baisse ? 6 : 10) : 0;
+    moi.h = maintenant;
 
-    // Les autres : on glisse en douceur vers leur dernière position connue
+    // Les autres : on rejoue leur historique avec un léger retard,
+    // en reliant les positions reçues en ligne droite (interpolation).
     for (const [id, j] of autres) {
       if (maintenant - j.vu > EXPIRATION_MS) { autres.delete(id); continue; }
-      j.x += (j.cibleX - j.x) * Math.min(1, dt * 12);
-      j.y += (j.cibleY - j.y) * Math.min(1, dt * 15);
-      const bouge = (j.marche || Math.abs(j.cibleX - j.x) > 1) && j.y < 1;
+      interpoler(j, maintenant);
+      const bouge = j.marche && j.y < 1;
       j.phase = bouge ? j.phase + dt * (j.baisse ? 6 : 10) : 0;
     }
 

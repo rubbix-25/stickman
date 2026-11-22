@@ -24,7 +24,7 @@ function creerReseau(salle) {
     const client = window.supabase.createClient(
       window.CONFIG.SUPABASE_URL,
       window.CONFIG.SUPABASE_KEY,
-      { realtime: { params: { eventsPerSecond: 20 } } }
+      { realtime: { params: { eventsPerSecond: 30 } } }
     );
     const canal = client.channel("stickman:" + salle, {
       config: { broadcast: { self: false } },
