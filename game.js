@@ -205,20 +205,21 @@ function troncon(i) {
 
 function genererTroncon(i) {
   if (monde.phase === "attente") {
-    return { plateformes: i === 0 ? PLATEFORMES_SALLE : [], drones: [], coeur: null };
+    return { plateformes: i === 0 ? PLATEFORMES_SALLE : [], drones: [], coeur: null, trous: [] };
   }
   const r = aleatoire(hachage(monde.graine, i, 7));
   const debut = i * TRONCON;
 
-  // Plateformes : 2 à 4 par tronçon, à différentes hauteurs, sans se chevaucher
+  // Plateformes : 7 à 9 essais par tronçon, sur 5 hauteurs ; on écarte celles qui
+  // seraient trop près d'une autre (deux niveaux voisins ne se superposent pas)
   const plateformes = [];
-  const niveaux = [110, 200, 290, 380];
-  const nb = 2 + Math.floor(r() * 3);
+  const niveaux = [100, 180, 260, 340, 420];
+  const nb = 7 + Math.floor(r() * 3);
   for (let k = 0; k < nb; k++) {
     const w = 90 + r() * 100;
     const x = debut + 20 + r() * (TRONCON - w - 40);
     const y = niveaux[Math.floor(r() * niveaux.length)];
-    const gene = plateformes.some(p => Math.abs(p.y - y) < 80 && x < p.x + p.w + 30 && x + w + 30 > p.x);
+    const gene = plateformes.some(p => Math.abs(p.y - y) < 100 && x < p.x + p.w + 30 && x + w + 30 > p.x);
     if (!gene) plateformes.push({ x, y, w });
   }
 
@@ -245,7 +246,23 @@ function genererTroncon(i) {
     const p = plateformes.length ? plateformes[Math.floor(r() * plateformes.length)] : null;
     coeur = { id: "c" + i, x: p ? p.x + p.w / 2 : debut + TRONCON / 2, y: (p ? p.y : 0) + 28 };
   }
-  return { plateformes, drones, coeur };
+
+  // Un trou dans le sol de temps en temps (assez étroit pour être sauté :
+  // un saut couvre environ 300 unités en largeur)
+  const trous = [];
+  if (i >= 2 && r() < 0.35) {
+    const w = 70 + r() * 50;
+    trous.push({ x: debut + 60 + r() * (TRONCON - w - 120), w });
+  }
+  return { plateformes, drones, coeur, trous };
+}
+
+// Le sol est-il troué sous cette position ?
+function trouA(x) {
+  for (const t of tronconsEntre(x - 1, x + 1)) {
+    for (const h of t.trous) if (x > h.x && x < h.x + h.w) return h;
+  }
+  return null;
 }
 
 function posDrone(d, T) {
@@ -481,6 +498,7 @@ function lancerJeu(nom, tete) {
       if (m.s !== monde.graine || typeof m.h !== "number") return;
       const j = autres.get(m.id);
       balles.push({ proprio: m.id, local: false, x: +m.x, y: +m.y, dir: m.dir < 0 ? -1 : 1, h: m.h, couleur: j ? j.couleur : "#1b1b1b", recu });
+      if (j) j.dernierTir = m.h; // pour afficher sa barre de recharge
       sonTir(0.5);
       return;
     }
@@ -659,8 +677,8 @@ function lancerJeu(nom, tete) {
       moi.y += moi.vy * dt;
       moi.sol = false;
       if (moi.vy <= 0) {
-        if (moi.y <= 0) { moi.y = 0; moi.vy = 0; moi.sol = true; }
-        else {
+        if (moi.y <= 0 && yAvant >= 0 && !trouA(moi.x)) { moi.y = 0; moi.vy = 0; moi.sol = true; }
+        else if (moi.y > 0) {
           const p = plateformeSous(moi.x, yAvant, moi.y);
           if (p) { moi.y = p.y; moi.vy = 0; moi.sol = true; }
         }
@@ -670,8 +688,17 @@ function lancerJeu(nom, tete) {
       moi.marche = sens !== 0;
       if (sens) moi.dir = sens;
       moi.vx = sens * (moi.baisse ? VITESSE_ACCROUPI : VITESSE);
+      const xAvant = moi.x;
       moi.x = Math.max(cam + BORD, Math.min(cam + VUE_L - BORD, moi.x + moi.vx * dt));
       moi.phase = moi.marche && moi.sol ? moi.phase + dt * (moi.baisse ? 6 : 10) : 0;
+
+      // Dans un trou : on ne peut plus en ressortir par le côté, et on est éliminé
+      // tout de suite (même invincible)
+      if (moi.y < 0) {
+        const h = trouA(xAvant);
+        if (h) moi.x = Math.max(h.x + 2, Math.min(h.x + h.w - 2, moi.x));
+        if (moi.y < -30) { moi.vies = 0; moi.elimine = true; }
+      }
 
       // Touché par un drone ?
       if (maintenant >= moi.invincibleJusqua) {
@@ -841,14 +868,25 @@ function lancerJeu(nom, tete) {
     ctx.lineCap = "round";
     ctx.strokeStyle = "#1b1b1b";
 
-    // Sol
-    ctx.lineWidth = Math.max(3, 6 * e);
-    ctx.beginPath();
-    ctx.moveTo(ox, sy(0));
-    ctx.lineTo(ox + VUE_L * e, sy(0));
-    ctx.stroke();
-
     const visibles = [...tronconsEntre(cam - 100, cam + VUE_L + 100)];
+
+    // Sol, interrompu par les trous (avec un fond sombre dans le trou)
+    const trous = visibles.flatMap(t => t.trous).sort((a, b) => a.x - b.x);
+    ctx.fillStyle = "#1b1b1b";
+    for (const h of trous) ctx.fillRect(sx(h.x), sy(0), h.w * e, SOL_MARGE * e);
+    ctx.lineWidth = Math.max(3, 6 * e);
+    ctx.lineCap = "butt";
+    ctx.beginPath();
+    let depuis = cam - 10;
+    for (const h of trous) {
+      ctx.moveTo(sx(depuis), sy(0));
+      ctx.lineTo(sx(h.x), sy(0));
+      depuis = h.x + h.w;
+    }
+    ctx.moveTo(sx(depuis), sy(0));
+    ctx.lineTo(sx(cam + VUE_L + 10), sy(0));
+    ctx.stroke();
+    ctx.lineCap = "round";
 
     // Plateformes
     ctx.lineWidth = Math.max(3, 5 * e);
@@ -1089,8 +1127,14 @@ function lancerJeu(nom, tete) {
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
     ctx.fillText(j.nom + (monde.phase === "attente" && j.pret ? " ✓" : ""), teteX, hautTete - 8 * s);
-    if (estMoi) {
-      const reste = Math.max(0, moi.prochainTir - maintenant) / CADENCE_TIR_MS;
+    // Barre de recharge du pistolet (pour tout le monde). Pour un autre joueur, on
+    // la calcule à partir de l'heure de son dernier tir, sur notre affichage décalé.
+    let reste = 0;
+    if (estMoi) reste = Math.max(0, moi.prochainTir - maintenant) / CADENCE_TIR_MS;
+    else if (j.dernierTir !== undefined && j.decalage !== undefined) {
+      reste = Math.max(0, Math.min(1, (j.dernierTir + CADENCE_TIR_MS - (maintenant - j.decalage)) / CADENCE_TIR_MS));
+    }
+    {
       if (reste > 0) {
         const l = 30 * s, yb = hautTete - 5 * s;
         ctx.fillStyle = "#0000001f";
