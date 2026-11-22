@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Extraction des têtes</title>
+  <style>
+    body { margin: 0; padding: 16px; font-family: system-ui, sans-serif; background: #f4f1ea; color: #1b1b1b; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    #etat { margin: 0 0 16px; }
+    #resultats { display: flex; flex-wrap: wrap; gap: 16px; }
+    figure { margin: 0; text-align: center; font-size: 13px; }
+    figure img {
+      width: 128px; height: 128px; border-radius: 12px; display: block;
+      /* damier pour voir la transparence */
+      background: repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 0 0 / 16px 16px;
+    }
+    .erreur { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <h1>Extraction des têtes</h1>
+  <p id="etat">Chargement du modèle…</p>
+  <div id="resultats"></div>
+
+<script type="module">
+// Découpe la tête (cheveux + visage + chapeau éventuel) de chaque photo du dossier
+// pictures/, avec un fond transparent, et l'enregistre dans tetes/ (via outils/serveur.py).
+// Modèle : MediaPipe "selfie multiclass" qui classe chaque pixel :
+// 0 fond, 1 cheveux, 2 peau du corps, 3 peau du visage, 4 vêtements, 5 accessoires.
+import { FilesetResolver, ImageSegmenter } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const TAILLE_SORTIE = 256;
+const TAILLE_TRAVAIL = 1024;     // on réduit les grandes photos pour aller plus vite
+const CHEVEUX = 1, VISAGE = 3, ACCESSOIRE = 5;
+
+const etat = document.getElementById("etat");
+const resultats = document.getElementById("resultats");
+window.extraction = { fini: false, ok: [], echecs: [] };
+
+function nomFichier(nom) {
+  const base = nom.replace(/\.[^.]+$/, "");
+  return base.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "tete";
+}
+
+// Plus grande zone d'un seul tenant parmi les pixels où garder[i] est vrai
+function plusGrandeZone(garder, w, h) {
+  const vu = new Uint8Array(w * h), pile = new Int32Array(w * h);
+  let meilleure = null;
+  for (let depart = 0; depart < w * h; depart++) {
+    if (!garder[depart] || vu[depart]) continue;
+    let n = 0, haut = 0; const pixels = [];
+    pile[haut++] = depart; vu[depart] = 1;
+    while (haut) {
+      const p = pile[--haut]; pixels.push(p); n++;
+      const x = p % w, y = (p / w) | 0;
+      if (x > 0 && garder[p - 1] && !vu[p - 1]) { vu[p - 1] = 1; pile[haut++] = p - 1; }
+      if (x < w - 1 && garder[p + 1] && !vu[p + 1]) { vu[p + 1] = 1; pile[haut++] = p + 1; }
+      if (y > 0 && garder[p - w] && !vu[p - w]) { vu[p - w] = 1; pile[haut++] = p - w; }
+      if (y < h - 1 && garder[p + w] && !vu[p + w]) { vu[p + w] = 1; pile[haut++] = p + w; }
+    }
+    if (!meilleure || n > meilleure.length) meilleure = pixels;
+  }
+  return meilleure;
+}
+
+function cadre(pixels, w) {
+  let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+  for (const p of pixels) {
+    const x = p % w, y = (p / w) | 0;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  return { x0, y0, x1, y1, l: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+// "Ouverture" : on rétrécit puis regonfle le masque de r pixels. Tout ce qui est
+// plus fin que 2r disparaît, le reste retrouve sa forme.
+function ouverture(m, w, h, r) {
+  // distance (en carrés) au fond, calculée en deux passes séparables (min glissant)
+  const passe = (src, horizontal, valeur) => {
+    const dst = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let res = valeur;
+      for (let d = -r; d <= r; d++) {
+        const xx = horizontal ? x + d : x, yy = horizontal ? y : y + d;
+        const v = (xx < 0 || yy < 0 || xx >= w || yy >= h) ? 0 : src[yy * w + xx];
+        if (valeur === 1 && !v) { res = 0; break; }   // érosion
+        if (valeur === 0 && v) { res = 1; break; }    // dilatation
+      }
+      dst[y * w + x] = res;
+    }
+    return dst;
+  };
+  const erode = passe(passe(m, true, 1), false, 1);
+  const res = passe(passe(erode, true, 0), false, 0);
+  m.set(res);
+}
+
+// Bouche les trous à l'intérieur du masque (yeux, lunettes mal classés...)
+function boucherTrous(masque, w, h) {
+  const dehors = new Uint8Array(w * h), pile = new Int32Array(w * h); let haut = 0;
+  const pousser = (p) => { if (!masque[p] && !dehors[p]) { dehors[p] = 1; pile[haut++] = p; } };
+  for (let x = 0; x < w; x++) { pousser(x); pousser((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { pousser(y * w); pousser(y * w + w - 1); }
+  while (haut) {
+    const p = pile[--haut], x = p % w, y = (p / w) | 0;
+    if (x > 0) pousser(p - 1); if (x < w - 1) pousser(p + 1);
+    if (y > 0) pousser(p - w); if (y < h - 1) pousser(p + w);
+  }
+  for (let p = 0; p < w * h; p++) if (!dehors[p]) masque[p] = 1;
+}
+
+async function extraire(segmenteur, fichier) {
+  const img = await createImageBitmap(await (await fetch("../pictures/" + encodeURIComponent(fichier))).blob());
+  const r = Math.min(1, TAILLE_TRAVAIL / Math.max(img.width, img.height));
+  const w = Math.round(img.width * r), h = Math.round(img.height * r);
+  const toile = new OffscreenCanvas(w, h);
+  toile.getContext("2d").drawImage(img, 0, 0, w, h);
+
+  const res = segmenteur.segment(toile);
+  const classes = res.categoryMask.getAsUint8Array().slice();
+  const mw = res.categoryMask.width, mh = res.categoryMask.height;
+  res.close();
+  if (mw !== w || mh !== h) throw new Error("masque de taille inattendue");
+
+  // 1) Le visage = la plus grande zone de "peau du visage"
+  const visage = plusGrandeZone(classes.map(c => c === VISAGE ? 1 : 0), w, h);
+  if (!visage || visage.length < 400) throw new Error("aucun visage trouvé");
+  const F = cadre(visage, w);
+
+  // 2) La tête = cheveux + visage (+ accessoires au-dessus du front : casquette, chapeau),
+  //    dans une zone raisonnable autour du visage
+  // (assez serré : sinon un fond sombre, comme un ciel de nuit, peut passer pour des cheveux)
+  const zx0 = F.x0 - 0.4 * F.l, zx1 = F.x1 + 0.4 * F.l, zy0 = F.y0 - 0.55 * F.h, zy1 = F.y1 + 0.1 * F.h;
+  const tete = new Uint8Array(w * h);
+  for (let p = 0; p < w * h; p++) {
+    const x = p % w, y = (p / w) | 0, c = classes[p];
+    if (x < zx0 || x > zx1 || y < zy0 || y > zy1) continue;
+    if (c === CHEVEUX || c === VISAGE) tete[p] = 1;
+    else if (c === ACCESSOIRE && y < F.y0 + 0.25 * F.h && x > F.x0 - 0.3 * F.l && x < F.x1 + 0.3 * F.l) tete[p] = 1;
+  }
+  // 3) On gomme les fines excroissances (bout de bouteille, main...), on ne garde
+  //    que le morceau principal, et on bouche les trous
+  ouverture(tete, w, h, Math.max(2, Math.round(0.05 * F.l)));
+  const principal = plusGrandeZone(tete, w, h);
+  const masque = new Uint8Array(w * h);
+  for (const p of principal) masque[p] = 1;
+  boucherTrous(masque, w, h);
+  const T = cadre(principal, w);
+
+  // 4) Recadrage carré autour de la tête, sortie 256 x 256 avec fond transparent
+  const cote = Math.max(T.l, T.h) * 1.08;
+  const cx = (T.x0 + T.x1) / 2, cy = (T.y0 + T.y1) / 2;
+  const sx = cx - cote / 2, sy = cy - cote / 2;
+
+  const alpha = new OffscreenCanvas(w, h);
+  const ia = new ImageData(w, h);
+  for (let p = 0; p < w * h; p++) if (masque[p]) ia.data[p * 4 + 3] = 255;
+  alpha.getContext("2d").putImageData(ia, 0, 0);
+
+  const sortie = new OffscreenCanvas(TAILLE_SORTIE, TAILLE_SORTIE);
+  const ctx = sortie.getContext("2d");
+  const k = TAILLE_SORTIE / cote;
+  ctx.drawImage(toile, sx, sy, cote, cote, 0, 0, TAILLE_SORTIE, TAILLE_SORTIE);
+  ctx.globalCompositeOperation = "destination-in";
+  ctx.filter = `blur(${Math.max(0.8, 1.2 * k).toFixed(1)}px)`; // bords adoucis
+  ctx.drawImage(alpha, sx, sy, cote, cote, 0, 0, TAILLE_SORTIE, TAILLE_SORTIE);
+  return await sortie.convertToBlob({ type: "image/png" });
+}
+
+async function empreinte(blob) {
+  const h = await crypto.subtle.digest("SHA-1", await blob.arrayBuffer());
+  return [...new Uint8Array(h)].slice(0, 5).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function lancer() {
+  const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const segmenteur = await ImageSegmenter.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite" },
+    runningMode: "IMAGE", outputCategoryMask: true, outputConfidenceMasks: false,
+  });
+
+  const photos = await (await fetch("photos")).json();
+  await fetch("tetes/vider", { method: "POST" });
+  const liste = [], dejaPris = new Set();
+
+  for (const [i, fichier] of photos.entries()) {
+    etat.textContent = `Photo ${i + 1} / ${photos.length} : ${fichier}`;
+    const fig = document.createElement("figure");
+    try {
+      const png = await extraire(segmenteur, fichier);
+      let nom = nomFichier(fichier), n = 2;
+      while (dejaPris.has(nom)) nom = nomFichier(fichier) + "-" + n++;
+      dejaPris.add(nom);
+      const r = await fetch("tetes/" + nom + ".png", { method: "POST", body: png });
+      if (!r.ok) throw new Error("enregistrement impossible");
+      liste.push({ nom: fichier.replace(/\.[^.]+$/, ""), fichier: nom + ".png", v: await empreinte(png) });
+      fig.innerHTML = `<img alt=""><figcaption></figcaption>`;
+      fig.querySelector("img").src = URL.createObjectURL(png);
+      fig.querySelector("figcaption").textContent = nom + ".png";
+      window.extraction.ok.push(fichier);
+    } catch (e) {
+      fig.innerHTML = `<figcaption class="erreur"></figcaption>`;
+      fig.querySelector("figcaption").textContent = fichier + " : " + e.message;
+      window.extraction.echecs.push({ fichier, erreur: e.message });
+    }
+    resultats.appendChild(fig);
+  }
+  await fetch("tetes/liste.json", { method: "POST", body: JSON.stringify({ tetes: liste }, null, 2) });
+  etat.textContent = `Terminé : ${liste.length} tête(s) extraite(s), ${window.extraction.echecs.length} échec(s).`;
+  window.extraction.fini = true;
+}
+
+lancer().catch((e) => {
+  etat.innerHTML = ""; etat.className = "erreur"; etat.textContent = "Erreur : " + e.message;
+  window.extraction.fini = true; window.extraction.erreur = e.message;
+});
+</script>
+</body>
+</html>

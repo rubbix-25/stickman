@@ -1,2 +1,10 @@
 # Réglages locaux de Claude Code (serveur de test), pas utiles en ligne
 .claude/
+
+# Photos de tes amis et têtes extraites : JAMAIS sur GitHub (le dépôt est public).
+# Elles vont uniquement dans Supabase Storage.
+pictures/
+tetes/
+
+# Clé secrète Supabase (pour envoyer les têtes) : reste sur ce PC
+.secrets/

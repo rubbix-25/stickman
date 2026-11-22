@@ -15,6 +15,10 @@
     <form id="form-rejoindre" autocomplete="off">
       <label for="nom">Ton nom</label>
       <input id="nom" maxlength="16" placeholder="ex. Bob" required>
+      <div id="choix-tete" hidden>
+        <span class="label">Ta tête</span>
+        <div id="grille-tetes" role="radiogroup" aria-label="Choix de la tête"></div>
+      </div>
       <button type="submit">Rejoindre la partie</button>
     </form>
     <p id="mode" class="petit"></p>

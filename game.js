@@ -41,12 +41,81 @@ const champNom = document.getElementById("nom");
 try { champNom.value = localStorage.getItem("stickman-nom") || ""; } catch (e) {}
 champNom.focus();
 
+// ---------- Têtes (photos) ----------
+// En local, on lit le dossier tetes/ ; en ligne, le bucket public Supabase "tetes".
+const EN_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const BASE_TETES = EN_LOCAL
+  ? "tetes/"
+  : (window.CONFIG.SUPABASE_URL || "") + "/storage/v1/object/public/tetes/";
+const tetesDispo = new Map();   // fichier -> { nom, v }
+const imagesTetes = new Map();  // fichier -> Image
+let maTete = "";
+try { maTete = localStorage.getItem("stickman-tete") || ""; } catch (e) {}
+
+// Renvoie l'image d'une tête si elle est connue et chargée, sinon null
+function imageTete(fichier) {
+  const infos = fichier && tetesDispo.get(fichier);
+  if (!infos) return null;
+  let img = imagesTetes.get(fichier);
+  if (!img) {
+    img = new Image();
+    img.src = BASE_TETES + encodeURIComponent(fichier) + "?v=" + encodeURIComponent(infos.v);
+    imagesTetes.set(fichier, img);
+  }
+  return img.complete && img.naturalWidth ? img : null;
+}
+
+async function chargerTetes() {
+  try {
+    const r = await fetch(BASE_TETES + "liste.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) return;
+    const { tetes } = await r.json();
+    for (const t of tetes) {
+      if (/^[a-z0-9_-]{1,60}\.png$/.test(t.fichier)) tetesDispo.set(t.fichier, { nom: String(t.nom), v: String(t.v) });
+    }
+  } catch (e) { return; }
+  if (!tetesDispo.has(maTete)) maTete = "";
+  afficherChoixTetes();
+}
+
+function afficherChoixTetes() {
+  if (!tetesDispo.size) return;
+  const grille = document.getElementById("grille-tetes");
+  grille.textContent = "";
+  const ajouter = (fichier, titre, contenu) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", String(fichier === maTete));
+    b.title = titre;
+    b.setAttribute("aria-label", titre);
+    b.appendChild(contenu);
+    b.addEventListener("click", () => {
+      maTete = fichier;
+      try { localStorage.setItem("stickman-tete", maTete); } catch (e) {}
+      for (const autre of grille.children) autre.setAttribute("aria-checked", String(autre === b));
+    });
+    grille.appendChild(b);
+  };
+  const rond = document.createElement("span");
+  rond.className = "classique";
+  ajouter("", "Tête classique", rond);
+  for (const [fichier, infos] of tetesDispo) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = BASE_TETES + encodeURIComponent(fichier) + "?v=" + encodeURIComponent(infos.v);
+    ajouter(fichier, infos.nom, img);
+  }
+  document.getElementById("choix-tete").hidden = false;
+}
+chargerTetes();
+
 document.getElementById("form-rejoindre").addEventListener("submit", (e) => {
   e.preventDefault();
   const nom = champNom.value.trim().slice(0, 16);
   if (!nom) return;
   try { localStorage.setItem("stickman-nom", nom); } catch (e) {}
-  lancerJeu(nom);
+  lancerJeu(nom, maTete);
 });
 
 // ---------- Position des autres joueurs ----------
@@ -95,7 +164,7 @@ function interpoler(j, maintenant) {
 }
 
 // ---------- Jeu ----------
-function lancerJeu(nom) {
+function lancerJeu(nom, tete) {
   document.getElementById("lobby").hidden = true;
   document.getElementById("jeu").hidden = false;
 
@@ -106,6 +175,7 @@ function lancerJeu(nom) {
   const moi = {
     id: monId,
     nom,
+    tete,          // fichier de la photo choisie ("" = tête classique)
     x: PLATEFORME_DEBUT + 50 + Math.random() * (PLATEFORME_FIN - PLATEFORME_DEBUT - 100),
     y: 0,          // hauteur au-dessus de la plateforme (0 = au sol)
     vx: 0,         // vitesse horizontale
@@ -129,6 +199,7 @@ function lancerJeu(nom) {
     x: Math.round(moi.x * 10) / 10, y: Math.round(moi.y * 10) / 10,
     vx: Math.round(moi.vx), vy: Math.round(moi.vy),
     dir: moi.dir, marche: moi.marche, baisse: moi.baisse,
+    tete: moi.tete,
   });
 
   net.onMessage((m) => {
@@ -141,6 +212,7 @@ function lancerJeu(nom) {
       autres.set(m.id, j);
     }
     j.nom = String(m.nom).slice(0, 16);
+    j.tete = typeof m.tete === "string" && tetesDispo.has(m.tete) ? m.tete : "";
     j.vu = recu;
 
     if (typeof m.h === "number") {
@@ -315,9 +387,13 @@ function lancerJeu(nom) {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.beginPath();
-    // Tête
-    ctx.moveTo(x + teteR, epaule - teteR - 2 * s);
-    ctx.arc(x, epaule - teteR - 2 * s, teteR, 0, Math.PI * 2);
+    // Tête : la photo choisie si elle est chargée, sinon un rond
+    const teteY = epaule - teteR - 2 * s;
+    const photo = imageTete(j.tete);
+    if (!photo) {
+      ctx.moveTo(x + teteR, teteY);
+      ctx.arc(x, teteY, teteR, 0, Math.PI * 2);
+    }
     // Corps
     ctx.moveTo(x, epaule);
     ctx.lineTo(x, hanche);
@@ -359,7 +435,18 @@ function lancerJeu(nom) {
     ctx.font = "600 " + Math.max(12, Math.round(15 * s)) + "px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(j.nom, x, epaule - teteR * 2 - 8 * s);
+    let hautTete = teteY - teteR;
+    if (photo) {
+      // Grosse tête façon caricature, tournée dans le sens de la marche
+      const taille = teteR * 3.4;
+      ctx.save();
+      ctx.translate(x, teteY - taille * 0.12);
+      if (j.dir < 0) ctx.scale(-1, 1);
+      ctx.drawImage(photo, -taille / 2, -taille / 2, taille, taille);
+      ctx.restore();
+      hautTete = teteY - taille * 0.12 - taille / 2;
+    }
+    ctx.fillText(j.nom, x, hautTete - 6 * s);
   }
 
   requestAnimationFrame(boucle);
