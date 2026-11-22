@@ -16,7 +16,7 @@ const IMPULSION_SAUT = 560;     // vitesse vers le haut au moment du saut
 const GRAVITE = 1600;           // ce qui fait retomber
 // Réseau : on envoie tout de suite chaque changement (départ, arrêt, saut...),
 // plus une petite correction régulière pendant qu'on bouge.
-const ENVOI_MS = 100;           // correction régulière : 10 / s quand on bouge
+const ENVOI_MS = 333;           // correction régulière : 3 / s quand on bouge
 const BATTEMENT_MS = 2000;      // signe de vie quand on ne bouge pas
 const EXPIRATION_MS = 6000;     // joueur retiré s'il ne donne plus de nouvelles
 // Chaque message contient la position ET la vitesse : entre deux messages, on calcule
@@ -50,32 +50,47 @@ document.getElementById("form-rejoindre").addEventListener("submit", (e) => {
 });
 
 // ---------- Position des autres joueurs ----------
-// Place le joueur j là où il était il y a "tampon" millisecondes :
-//  - si on a déjà reçu la position d'après, on relie les deux en ligne droite ;
-//  - sinon, on la calcule depuis la dernière reçue, avec sa vitesse et la gravité.
+// Où sera un joueur au temps t, d'après un message s (sa position + sa vitesse) ?
+// Marche à vitesse constante, et gravité s'il est en l'air.
+function predire(s, t) {
+  const dt = Math.max(0, Math.min(t - s.h, PREDICTION_MAX_MS)) / 1000;
+  return {
+    x: Math.max(PLATEFORME_DEBUT + 15, Math.min(PLATEFORME_FIN - 15, s.x + s.vx * dt)),
+    y: (s.y > 0 || s.vy > 0) ? Math.max(0, s.y + s.vy * dt - GRAVITE / 2 * dt * dt) : 0,
+  };
+}
+
+// Place le joueur j là où il était il y a "tampon" millisecondes : on suit la
+// trajectoire calculée depuis le dernier message (a). Si le message suivant (b) est
+// déjà arrivé, on corrige en douceur le petit écart entre le calcul et la réalité.
 function interpoler(j, maintenant) {
   const histo = j.historique;
   if (!histo.length) return;
-  const tAffiche = maintenant - j.ecart - j.tampon; // en heure de son horloge
+  // Décalage entre notre horloge et le moment affiché chez lui (écart d'horloge + tampon).
+  // Quand l'estimation change, on le fait glisser doucement (au plus 10 % plus vite ou
+  // plus lent que le temps réel) : invisible à l'œil, alors qu'un saut ferait un bond.
+  const cible = j.ecart + j.tampon;
+  if (j.decalage === undefined) j.decalage = cible;
+  else {
+    const pas = Math.max(0, maintenant - j.tCalcul) * 0.1;
+    j.decalage += Math.max(-pas, Math.min(pas, cible - j.decalage));
+  }
+  j.tCalcul = maintenant;
+  const tAffiche = maintenant - j.decalage; // en heure de son horloge
 
-  // a = dernière position connue à ce moment-là, b = la suivante (si déjà reçue)
+  // a = dernier message à ce moment-là, b = le suivant (s'il est déjà arrivé)
   let i = histo.length - 1;
   while (i > 0 && histo[i].h > tAffiche) i--;
   const a = histo[i], b = histo[i + 1];
 
+  const p = predire(a, tAffiche);
   if (b && tAffiche >= a.h) {
     const k = (tAffiche - a.h) / (b.h - a.h);
-    j.x = a.x + (b.x - a.x) * k;
-    j.y = a.y + (b.y - a.y) * k;
-    const ref = k < 0.5 ? a : b;
-    j.dir = ref.dir; j.marche = ref.marche; j.baisse = ref.baisse;
-    return;
+    const pb = predire(a, b.h);
+    p.x += (b.x - pb.x) * k;
+    p.y = Math.max(0, p.y + (b.y - pb.y) * k);
   }
-
-  // Prédiction depuis a
-  const dt = Math.max(0, Math.min(tAffiche - a.h, PREDICTION_MAX_MS)) / 1000;
-  j.x = Math.max(PLATEFORME_DEBUT + 15, Math.min(PLATEFORME_FIN - 15, a.x + a.vx * dt));
-  j.y = (a.y > 0 || a.vy > 0) ? Math.max(0, a.y + a.vy * dt - GRAVITE / 2 * dt * dt) : 0;
+  j.x = p.x; j.y = p.y;
   j.dir = a.dir; j.marche = a.marche; j.baisse = a.baisse;
 }
 
@@ -138,10 +153,9 @@ function lancerJeu(nom) {
       // Gigue : de combien ce message arrive plus tard que le plus rapide.
       // On retient le pire cas récent, qui s'oublie doucement (~3 s).
       const gigue = ecart - j.ecart;
-      j.gigue = j.gigue === undefined ? 20 : Math.max(gigue, j.gigue * 0.97);
-      // Tampon = gigue + petite marge, qui évolue en douceur pour éviter les à-coups
-      const cible = Math.max(TAMPON_MIN_MS, Math.min(TAMPON_MAX_MS, j.gigue + 10));
-      j.tampon = j.tampon === undefined ? cible : j.tampon + (cible - j.tampon) * 0.1;
+      j.gigue = j.gigue === undefined ? 30 : Math.max(gigue, j.gigue * 0.97);
+      // Tampon = gigue + petite marge (appliqué en douceur dans interpoler)
+      j.tampon = Math.max(TAMPON_MIN_MS, Math.min(TAMPON_MAX_MS, j.gigue + 10));
 
       const dernier = j.historique[j.historique.length - 1];
       if (!dernier || m.h > dernier.h) {
